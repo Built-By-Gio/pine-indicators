@@ -6,7 +6,7 @@ For education and chart study, not financial advice.
 
 ## Status (2026-11-25)
 
-- Written for Pine v6 (`//@version=6`). This repo copy has not been re-compiled in TradingView as part of publishing, so it is not confirmed to load without errors.
+- Written for Pine v6 (`//@version=6`). It compiles and loads in TradingView.
 - Signals have not been backtested here. No results or performance figures are claimed.
 - Not documented yet: chart screenshots.
 
