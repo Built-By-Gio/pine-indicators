@@ -1,0 +1,534 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+//  COIL HUNTER SUITE — all-in-one
+//  Bollinger Bands + Keltner Channels + AMD (LIT) Daily Profile + Coil Hunter
+//
+//  • Bands: off by default, toggle on. Squeeze shading always available.
+//  • AMD (LIT): full Accumulation→Manipulation→Distribution read. VISUAL ONLY —
+//    it draws the profile but does NOT block Coil signals.
+//  • Coil Hunter: squeeze + spring/upthrust + OBV bias, confidence-scored.
+//  • Preset: one dropdown, Auto-detects the chart symbol.
+//
+//  Settings are grouped by module so nothing gets crowded. Each module has a
+//  single master on/off at the top of its group.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("Coil Hunter Suite", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  0 · PRESET  (one dropdown drives every module)
+// ════════════════════════════════════════════════════════════════════════════
+gP = "① Preset"
+presetMode = input.string("Auto (detect from chart)", "Instrument", options = ["Auto (detect from chart)", "NQ", "ES", "SPX", "QQQ", "GC", "Manual"], group = gP, tooltip = "One choice tunes Coil Hunter params and AMD tick thresholds. Auto reads the chart symbol. Manual unlocks the override group.")
+
+sym = syminfo.ticker
+autoPick =
+     str.contains(sym, "NQ")  ? "NQ"  :
+     str.contains(sym, "MNQ") ? "NQ"  :
+     str.contains(sym, "ES")  ? "ES"  :
+     str.contains(sym, "MES") ? "ES"  :
+     str.contains(sym, "SPX") ? "SPX" :
+     str.contains(sym, "QQQ") ? "QQQ" :
+     str.contains(sym, "GC")  ? "GC"  :
+     str.contains(sym, "MGC") ? "GC"  :
+     "Manual"
+active = presetMode == "Auto (detect from chart)" ? autoPick : presetMode
+isManual = active == "Manual"
+
+// Coil Hunter preset table
+p_bbLen  = active == "NQ" ? 20 : active == "ES" ? 20 : active == "SPX" ? 24 : active == "QQQ" ? 22 : active == "GC" ? 20 : 20
+p_bbMult = active == "NQ" ? 2.0: active == "ES" ? 2.0: active == "SPX" ? 2.1: active == "QQQ" ? 2.0: active == "GC" ? 2.0: 2.0
+p_kcMult = active == "NQ" ? 1.5: active == "ES" ? 1.4: active == "SPX" ? 1.5: active == "QQQ" ? 1.5: active == "GC" ? 1.5: 1.5
+p_minSqz = active == "NQ" ? 6  : active == "ES" ? 7  : active == "SPX" ? 8  : active == "QQQ" ? 7  : active == "GC" ? 6  : 6
+p_obvLen = active == "NQ" ? 14 : active == "ES" ? 14 : active == "SPX" ? 18 : active == "QQQ" ? 16 : active == "GC" ? 14 : 14
+p_sprBuf = active == "NQ" ? 0.12:active == "ES" ? 0.10:active == "SPX" ? 0.08:active == "QQQ" ? 0.10:active == "GC" ? 0.10:0.10
+p_tp2Mlt = active == "NQ" ? 1.0: active == "ES" ? 1.0: active == "SPX" ? 1.0: active == "QQQ" ? 1.0: active == "GC" ? 1.0: 1.0
+
+// AMD futures tick preset
+atr14 = ta.atr(14)
+amdIsNQ = active == "NQ"
+amdIsES = active == "ES"
+amdIsGC = active == "GC"
+amdTick = active == "Auto (detect from chart)" or presetMode == "Auto (detect from chart)" ? syminfo.mintick : amdIsGC ? 0.10 : 0.25
+amdDefSweepT = amdIsNQ ? 40 : amdIsES ? 16 : amdIsGC ? 20 : math.max(1, math.round(nz(atr14) * 0.10 / syminfo.mintick))
+amdDefBufT   = amdIsNQ ? 60 : amdIsES ? 24 : amdIsGC ? 30 : math.max(1, math.round(nz(atr14) * 0.15 / syminfo.mintick))
+
+// ════════════════════════════════════════════════════════════════════════════
+//  1 · MANUAL OVERRIDES  (only used when Preset = Manual)
+// ════════════════════════════════════════════════════════════════════════════
+gM = "② Manual overrides (Preset = Manual)"
+mBbLen   = input.int(20,   "BB / KC length",           minval = 5,   group = gM)
+mBbMult  = input.float(2.0,"BB stdev mult",            step = 0.1,   group = gM)
+mKcMult  = input.float(1.5,"KC ATR mult",              step = 0.1,   group = gM)
+mMinSqz  = input.int(6,    "Min squeeze bars",         minval = 2,   group = gM)
+mObvLen  = input.int(14,   "OBV slope lookback",       minval = 3,   group = gM)
+mSprBuf  = input.float(0.1,"Spring SL buffer (xATR)",  step = 0.05,  group = gM)
+mTp2Mult = input.float(1.0,"TP2 measured (xRange)",    step = 0.25,  group = gM)
+
+bbLen   = isManual ? mBbLen   : p_bbLen
+bbMult  = isManual ? mBbMult  : p_bbMult
+kcMult  = isManual ? mKcMult  : p_kcMult
+minSqz  = isManual ? mMinSqz  : p_minSqz
+obvLen  = isManual ? mObvLen  : p_obvLen
+sprBuf  = isManual ? mSprBuf  : p_sprBuf
+tp2Mult = isManual ? mTp2Mult : p_tp2Mlt
+
+// ════════════════════════════════════════════════════════════════════════════
+//  2 · COIL HUNTER  (the signal engine)
+// ════════════════════════════════════════════════════════════════════════════
+gC = "③ Coil Hunter"
+useCoil  = input.bool(true, "Enable Coil Hunter signals", group = gC)
+minConf  = input.int(0,    "Min confidence % to alert", minval = 0, maxval = 100, group = gC)
+useSess  = input.bool(true,"Restrict to NY session",     group = gC)
+sessStr  = input.session("0930-1600", "Session (NY time)", group = gC)
+showCoilTargets = input.bool(true, "Draw SL / TP1 / TP2 on signal", group = gC)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  3 · BANDS  (off by default — pure visual)
+// ════════════════════════════════════════════════════════════════════════════
+gB = "④ Bands (visual)"
+showBB   = input.bool(false, "Show Bollinger Bands", group = gB)
+showKC   = input.bool(false, "Show Keltner Channels", group = gB)
+showSqzShade = input.bool(true, "Shade background when squeezed", group = gB)
+showSqzDots  = input.bool(true, "Squeeze on/off dots (basis line)", group = gB)
+bbColUp  = input.color(#F23645, "BB upper", inline = "bbc", group = gB)
+bbColLo  = input.color(#089981, "BB lower", inline = "bbc", group = gB)
+kcCol    = input.color(#2962FF, "KC", group = gB)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  4 · AMD DAILY PROFILE (LIT)  ·  VISUAL ONLY — does not gate signals
+// ════════════════════════════════════════════════════════════════════════════
+gAmd = "⑤ AMD Daily Profile (LIT) — visual"
+useAMD    = input.bool(true, "Enable AMD profile", group = gAmd)
+uSweepT   = input.int(0, "Min sweep depth (ticks, 0=preset)", minval = 0, group = gAmd, tooltip = "How far past the Asia extreme counts as a sweep. Defaults: NQ 40t, ES 16t, GC 20t.")
+uBufT     = input.int(0, "Expansion buffer (ticks, 0=preset)", minval = 0, group = gAmd, tooltip = "Close beyond the extreme by this much = expansion, side invalidated.")
+amdPivotLen = input.int(5, "Major swing lookback (RBOS)", minval = 1, group = gAmd)
+amdIdmLen   = input.int(3, "Minor swing lookback (IDM)",  minval = 1, group = gAmd)
+amdBreakClose = input.bool(true, "RBOS needs candle CLOSE beyond level", group = gAmd)
+amdReqIDM   = input.bool(true, "Require inducement before sweep", group = gAmd)
+amdRejBars  = input.int(3, "Bars to close back inside (sweep→manip)", minval = 1, maxval = 12, group = gAmd)
+amdReqDisp  = input.bool(true, "Require displacement on RBOS", group = gAmd)
+amdDispMult = input.float(1.0, "Displacement body ≥ ATR x", minval = 0.1, step = 0.1, group = gAmd)
+amdReqFVG   = input.bool(false,"Require FVG on RBOS leg", group = gAmd)
+amdAllowFlip= input.bool(true, "Allow flip if both sides run", group = gAmd)
+amdUseRecent= input.bool(true, "RBOS ref = most recent swing (off = swing at sweep)", group = gAmd)
+amdShowIDM  = input.bool(true, "Show inducement (IDM) markers", group = gAmd)
+amdShowFVG  = input.bool(true, "Draw RBOS FVG box", group = gAmd)
+amdShowBox  = input.bool(true, "Draw Asia range box", group = gAmd)
+
+gAmdStyle = "⑥ AMD style & sessions"
+amdBoxFill = input.color(color.new(color.gray, 88), "Asia box fill",   group = gAmdStyle)
+amdBoxBord = input.color(color.new(color.gray, 45), "Asia box border", group = gAmdStyle)
+amdLineCol = input.color(color.black, "Manip / Dist line", group = gAmdStyle)
+amdManipCol= input.color(color.red,   "Manipulation text", group = gAmdStyle)
+amdDistCol = input.color(color.new(color.teal, 0), "Distribution text", group = gAmdStyle)
+amdIdmCol  = input.color(color.new(color.orange, 0), "IDM color", group = gAmdStyle)
+sessTZ = "America/New_York"
+aSH = input.int(6,  "Asia start hr", minval = 1, maxval = 12, inline = "a1", group = gAmdStyle)
+aSM = input.int(0,  ":min",  minval = 0, maxval = 59, inline = "a1", group = gAmdStyle)
+aSP = input.string("PM", "", options = ["AM","PM"], inline = "a1", group = gAmdStyle)
+aEH = input.int(3,  "Asia end hr", minval = 1, maxval = 12, inline = "a2", group = gAmdStyle)
+aEM = input.int(0,  ":min",  minval = 0, maxval = 59, inline = "a2", group = gAmdStyle)
+aEP = input.string("AM", "", options = ["AM","PM"], inline = "a2", group = gAmdStyle)
+lSH = input.int(3,  "London start hr", minval = 1, maxval = 12, inline = "l1", group = gAmdStyle)
+lSM = input.int(0,  ":min",  minval = 0, maxval = 59, inline = "l1", group = gAmdStyle)
+lSP = input.string("AM", "", options = ["AM","PM"], inline = "l1", group = gAmdStyle)
+nOH = input.int(9,  "NY open hr", minval = 1, maxval = 12, inline = "o1", group = gAmdStyle)
+nOM = input.int(30, ":min", minval = 0, maxval = 59, inline = "o1", group = gAmdStyle)
+nOP = input.string("AM", "", options = ["AM","PM"], inline = "o1", group = gAmdStyle)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  7 · DISPLAY
+// ════════════════════════════════════════════════════════════════════════════
+gD = "⑦ Display"
+showInfo = input.bool(true, "Show status panel", group = gD)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SHARED MATH
+// ════════════════════════════════════════════════════════════════════════════
+basis = ta.sma(close, bbLen)
+dev   = bbMult * ta.stdev(close, bbLen)
+bbUp  = basis + dev
+bbDn  = basis - dev
+atrKC = ta.atr(bbLen)
+kcUp  = basis + kcMult * atrKC
+kcDn  = basis - kcMult * atrKC
+squeezeOn = bbUp < kcUp and bbDn > kcDn
+
+var int sqzCount = 0
+sqzCount := squeezeOn ? sqzCount + 1 : 0
+
+atr = ta.atr(14)
+
+// ── Band plots (only when toggled) ────────────────────────────────────────────
+pBbU = plot(showBB ? bbUp : na, "BB Upper", color = bbColUp)
+plot(showBB ? basis : na, "BB Basis", color = color.new(bbColUp, 40))
+pBbL = plot(showBB ? bbDn : na, "BB Lower", color = bbColLo)
+pKcU = plot(showKC ? kcUp : na, "KC Upper", color = kcCol)
+plot(showKC ? basis : na, "KC Basis", color = color.new(kcCol, 40))
+pKcL = plot(showKC ? kcDn : na, "KC Lower", color = kcCol)
+plotSqzColor = not showSqzDots ? na : squeezeOn ? color.new(color.orange, 0) : color.new(color.green, 20)
+plot(showSqzDots ? basis : na, "Squeeze state (basis)", color = plotSqzColor, style = plot.style_circles, linewidth = 2)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  AMD LIT ENGINE (visual only)
+// ════════════════════════════════════════════════════════════════════════════
+to24min(int h12, int m, string ap) =>
+    int h = ap == "AM" ? (h12 == 12 ? 0 : h12) : (h12 == 12 ? 12 : h12 + 12)
+    h * 60 + m
+nowMin = hour(time, sessTZ) * 60 + minute(time, sessTZ)
+inWin(int s, int e) => s <= e ? (nowMin >= s and nowMin < e) : (nowMin >= s or nowMin < e)
+
+minSweep = (uSweepT > 0 ? uSweepT : amdDefSweepT) * amdTick
+bufPx    = (uBufT   > 0 ? uBufT   : amdDefBufT)   * amdTick
+
+asiaWinS  = to24min(aSH, aSM, aSP)
+asiaWinE  = to24min(aEH, aEM, aEP)
+londonS   = to24min(lSH, lSM, lSP)
+nyOpenMin = to24min(nOH, nOM, nOP)
+inAsia    = inWin(asiaWinS, asiaWinE)
+inLondon  = inWin(londonS, nyOpenMin)
+asiaStart = inAsia and not inAsia[1]
+asiaEnd   = not inAsia and inAsia[1]
+
+ph = ta.pivothigh(high, amdPivotLen, amdPivotLen)
+pl = ta.pivotlow(low,  amdPivotLen, amdPivotLen)
+var float sh = na
+var int shBar = na
+var float slv = na
+var int slBar = na
+if not na(ph)
+    sh := ph
+    shBar := bar_index - amdPivotLen
+if not na(pl)
+    slv := pl
+    slBar := bar_index - amdPivotLen
+
+mph = ta.pivothigh(high, amdIdmLen, amdIdmLen)
+mpl = ta.pivotlow(low,  amdIdmLen, amdIdmLen)
+var float mSh = na
+var int mShBar = na
+var float mSl = na
+var int mSlBar = na
+if not na(mph)
+    mSh := mph
+    mShBar := bar_index - amdIdmLen
+if not na(mpl)
+    mSl := mpl
+    mSlBar := bar_index - amdIdmLen
+
+// AMD state
+var float asiaHi = na
+var float asiaLo = na
+var int   asiaHiBar = na
+var int asiaLoBar = na
+var int   asiaStartBar = na
+var int   phase = 0            // 0 accum |1 hunt |2 sweep pend |3 manip→RBOS |4 dist |5 invalid
+var int   manipDir = 0
+var int pendDir = 0
+var float sweepExt = na
+var int sweepBar = na
+var float distRef = na
+var int distRefBar = na
+var box   curBox = na
+var label curLbl = na
+var bool  blockUp = false
+var bool blockDn = false
+var float idmHi = na
+var int idmHiBar = na
+var float idmLo = na
+var int idmLoBar = na
+var bool  idmUpTaken = false
+var bool idmDnTaken = false
+var float postHi = na
+var float postLo = na
+var string manipSess = "-"
+var bool  nyWarnDone = false
+
+if useAMD and asiaStart
+    asiaHi := high
+    asiaLo := low
+    asiaHiBar := bar_index
+    asiaLoBar := bar_index
+    asiaStartBar := bar_index
+    phase := 0
+    manipDir := 0
+    pendDir := 0
+    sweepExt := na
+    sweepBar := na
+    distRef := na
+    distRefBar := na
+    blockUp := false
+    blockDn := false
+    idmHi := na
+    idmLo := na
+    idmHiBar := na
+    idmLoBar := na
+    idmUpTaken := false
+    idmDnTaken := false
+    postHi := na
+    postLo := na
+    manipSess := "-"
+    nyWarnDone := false
+    curBox := amdShowBox ? box.new(bar_index, high, bar_index, low, border_color = amdBoxBord, bgcolor = amdBoxFill) : na
+    curLbl := na
+
+if useAMD and inAsia and phase == 0
+    if high > asiaHi
+        asiaHi := high
+        asiaHiBar := bar_index
+    if low < asiaLo
+        asiaLo := low
+        asiaLoBar := bar_index
+    if not na(curBox)
+        box.set_top(curBox, asiaHi), box.set_bottom(curBox, asiaLo), box.set_right(curBox, bar_index)
+
+if useAMD and asiaEnd and phase == 0
+    phase := 1
+    if not na(curBox)
+        box.set_right(curBox, bar_index)
+    curLbl := label.new(bar_index, asiaHi, "Asia", style = label.style_none, textcolor = color.gray, size = size.small, yloc = yloc.price)
+    if not na(mSh) and mShBar >= asiaStartBar and mSh < asiaHi
+        idmHi := mSh
+        idmHiBar := mShBar
+    if not na(mSl) and mSlBar >= asiaStartBar and mSl > asiaLo
+        idmLo := mSl
+        idmLoBar := mSlBar
+    postHi := high
+    postLo := low
+
+if useAMD and phase >= 1 and phase <= 3
+    postHi := na(postHi) ? high : math.max(postHi, high)
+    postLo := na(postLo) ? low  : math.min(postLo, low)
+
+if useAMD and phase == 1 and not inAsia
+    if not na(mph) and mph < asiaHi and not idmUpTaken
+        idmHi := mph
+        idmHiBar := bar_index - amdIdmLen
+    if not na(mpl) and mpl > asiaLo and not idmDnTaken
+        idmLo := mpl
+        idmLoBar := bar_index - amdIdmLen
+    if not idmUpTaken and not na(idmHi) and high > idmHi
+        idmUpTaken := true
+        if amdShowIDM
+            line.new(idmHiBar, idmHi, bar_index, idmHi, color = amdIdmCol, style = line.style_dotted)
+            label.new(bar_index, idmHi, "IDM", style = label.style_none, textcolor = amdIdmCol, size = size.tiny, yloc = yloc.price)
+    if not idmDnTaken and not na(idmLo) and low < idmLo
+        idmDnTaken := true
+        if amdShowIDM
+            line.new(idmLoBar, idmLo, bar_index, idmLo, color = amdIdmCol, style = line.style_dotted)
+            label.new(bar_index, idmLo, "IDM", style = label.style_none, textcolor = amdIdmCol, size = size.tiny, yloc = yloc.price)
+
+if useAMD and phase == 1 and not nyWarnDone and not inAsia and nowMin >= nyOpenMin
+    nyWarnDone := true
+    if not na(curLbl)
+        label.set_text(curLbl, "Asia (unswept) - NY to manipulate")
+
+if useAMD and phase == 1 and not inAsia
+    swU = high >= asiaHi + minSweep and not blockUp and (not amdReqIDM or idmUpTaken)
+    swD = low  <= asiaLo - minSweep and not blockDn and (not amdReqIDM or idmDnTaken)
+    goU = swU and (not swD or (high - asiaHi) >= (asiaLo - low))
+    goD = swD and not goU
+    if goU
+        pendDir := 1
+        sweepExt := high
+        sweepBar := bar_index
+        phase := 2
+    else if goD
+        pendDir := -1
+        sweepExt := low
+        sweepBar := bar_index
+        phase := 2
+
+if useAMD and phase == 2
+    if pendDir == 1
+        sweepExt := math.max(sweepExt, high)
+        if close < asiaHi
+            phase := 3
+            manipDir := 1
+            manipSess := inLondon ? "London" : (nowMin >= nyOpenMin ? "NY" : "London")
+            distRef := not na(slv) ? slv : postLo
+            distRefBar := not na(slv) ? slBar : bar_index
+            line.new(asiaHiBar, asiaHi, bar_index, asiaHi, color = amdLineCol)
+            label.new(sweepBar, sweepExt, "Manipulation", style = label.style_label_down, color = color.new(color.white, 100), textcolor = amdManipCol, size = size.small)
+            if not na(curLbl)
+                label.set_text(curLbl, "Asia (buyside purged)")
+        else if close > asiaHi + bufPx or bar_index - sweepBar >= amdRejBars
+            blockUp := true
+            phase := amdAllowFlip ? 1 : 5
+    else if pendDir == -1
+        sweepExt := math.min(sweepExt, low)
+        if close > asiaLo
+            phase := 3
+            manipDir := -1
+            manipSess := inLondon ? "London" : (nowMin >= nyOpenMin ? "NY" : "London")
+            distRef := not na(sh) ? sh : postHi
+            distRefBar := not na(sh) ? shBar : bar_index
+            line.new(asiaLoBar, asiaLo, bar_index, asiaLo, color = amdLineCol)
+            label.new(sweepBar, sweepExt, "Manipulation", style = label.style_label_up, color = color.new(color.white, 100), textcolor = amdManipCol, size = size.small)
+            if not na(curLbl)
+                label.set_text(curLbl, "Asia (sellside purged)")
+        else if close < asiaLo - bufPx or bar_index - sweepBar >= amdRejBars
+            blockDn := true
+            phase := amdAllowFlip ? 1 : 5
+
+if useAMD and phase == 1 and blockUp and blockDn
+    phase := 5
+
+if useAMD and phase == 3
+    if amdUseRecent
+        if manipDir == 1 and not na(pl)
+            distRef := pl
+            distRefBar := bar_index - amdPivotLen
+        if manipDir == -1 and not na(ph)
+            distRef := ph
+            distRefBar := bar_index - amdPivotLen
+    if amdAllowFlip
+        if manipDir == 1 and low <= asiaLo - minSweep and close > asiaLo and not blockDn and (not amdReqIDM or idmDnTaken)
+            manipDir := -1
+            manipSess := inLondon ? "London" : (nowMin >= nyOpenMin ? "NY" : manipSess)
+            distRef := not na(sh) ? sh : postHi
+            distRefBar := not na(sh) ? shBar : bar_index
+            line.new(asiaLoBar, asiaLo, bar_index, asiaLo, color = amdLineCol)
+            label.new(bar_index, low, "Manipulation flip", style = label.style_label_up, color = color.new(color.white, 100), textcolor = amdManipCol, size = size.small)
+        else if manipDir == -1 and high >= asiaHi + minSweep and close < asiaHi and not blockUp and (not amdReqIDM or idmUpTaken)
+            manipDir := 1
+            manipSess := inLondon ? "London" : (nowMin >= nyOpenMin ? "NY" : manipSess)
+            distRef := not na(slv) ? slv : postLo
+            distRefBar := not na(slv) ? slBar : bar_index
+            line.new(asiaHiBar, asiaHi, bar_index, asiaHi, color = amdLineCol)
+            label.new(bar_index, high, "Manipulation flip", style = label.style_label_down, color = color.new(color.white, 100), textcolor = amdManipCol, size = size.small)
+    bodyOK  = not amdReqDisp or math.abs(close - open) >= amdDispMult * atr14
+    fvgBear = high < low[2]
+    fvgBull = low  > high[2]
+    rbos = false
+    if manipDir == 1 and not na(distRef)
+        broke = amdBreakClose ? close < distRef : low < distRef
+        rbos := broke and bodyOK and (not amdReqFVG or fvgBear)
+    else if manipDir == -1 and not na(distRef)
+        broke = amdBreakClose ? close > distRef : high > distRef
+        rbos := broke and bodyOK and (not amdReqFVG or fvgBull)
+    if rbos
+        phase := 4
+        line.new(distRefBar, distRef, bar_index, distRef, color = amdLineCol)
+        label.new(bar_index, distRef, "Distribution (RBOS)", style = label.style_none, textcolor = amdDistCol, size = size.small, yloc = yloc.price)
+        if amdShowFVG
+            if manipDir == 1 and fvgBear
+                box.new(bar_index - 1, low[2], bar_index + 8, high, border_color = color.new(amdDistCol, 40), bgcolor = color.new(amdDistCol, 85))
+            else if manipDir == -1 and fvgBull
+                box.new(bar_index - 1, low, bar_index + 8, high[2], border_color = color.new(amdDistCol, 40), bgcolor = color.new(amdDistCol, 85))
+
+// ════════════════════════════════════════════════════════════════════════════
+//  COIL HUNTER ENGINE
+// ════════════════════════════════════════════════════════════════════════════
+var float rHi = na
+var float rLo = na
+var box rBox = na
+sqzStart = squeezeOn and not squeezeOn[1]
+
+if useCoil and sqzStart
+    rHi := high
+    rLo := low
+    rBox := box.new(bar_index, rHi, bar_index, rLo, border_color = color.new(color.yellow, 40), bgcolor = color.new(color.yellow, 92))
+if useCoil and squeezeOn and not sqzStart
+    rHi := math.max(rHi, high)
+    rLo := math.min(rLo, low)
+    if not na(rBox)
+        box.set_top(rBox, rHi), box.set_bottom(rBox, rLo), box.set_right(rBox, bar_index)
+rangeH = rHi - rLo
+
+obv = ta.obv
+obvSlope = ta.linreg(obv, obvLen, 0) - ta.linreg(obv, obvLen, 1)
+accumBull = obvSlope > 0
+accumBear = obvSlope < 0
+inSession = not useSess or not na(time(timeframe.period, sessStr, sessTZ))
+
+spring   = squeezeOn and sqzCount >= minSqz and not na(rLo) and low < rLo[1] and close > rLo[1] and close > open
+upthrust = squeezeOn and sqzCount >= minSqz and not na(rHi) and high > rHi[1] and close < rHi[1] and close < open
+
+confL = 50 + (accumBull ? 25 : 0) + (close < (rHi + rLo) / 2 ? 15 : 0) + (volume > ta.sma(volume, 20) ? 10 : 0)
+confS = 50 + (accumBear ? 25 : 0) + (close > (rHi + rLo) / 2 ? 15 : 0) + (volume > ta.sma(volume, 20) ? 10 : 0)
+
+var int lastSig = -9999
+cooled = bar_index - lastSig > minSqz
+
+preBuy  = useCoil and barstate.isconfirmed and spring   and accumBull and inSession and cooled and math.min(confL, 100) >= minConf
+preSell = useCoil and barstate.isconfirmed and upthrust and accumBear and inSession and cooled and not preBuy and math.min(confS, 100) >= minConf
+if preBuy or preSell
+    lastSig := bar_index
+
+if preBuy
+    slL = low - sprBuf * atr
+    tp1 = rHi
+    tp2 = rHi + tp2Mult * rangeH
+    x2  = bar_index + 25
+    label.new(bar_index, low, "PRE-BREAKOUT BUY " + str.tostring(math.min(confL, 100), "#") + "%\nSpring @ " + str.tostring(close, format.mintick), style = label.style_label_up, color = color.new(color.lime, 0), textcolor = color.black, size = size.normal)
+    if showCoilTargets
+        line.new(bar_index, slL, x2, slL, color = color.red, width = 2)
+        line.new(bar_index, tp1, x2, tp1, color = color.new(color.green, 30))
+        line.new(bar_index, tp2, x2, tp2, color = color.green, width = 2)
+        label.new(x2, slL, "SL "  + str.tostring(slL, format.mintick), style = label.style_label_left, color = color.new(color.red, 85), textcolor = color.red, size = size.small)
+        label.new(x2, tp1, "TP1 range high", style = label.style_label_left, color = color.new(color.green, 88), textcolor = color.green, size = size.small)
+        label.new(x2, tp2, "TP2 measured " + str.tostring(tp2, format.mintick), style = label.style_label_left, color = color.new(color.green, 82), textcolor = color.green, size = size.small)
+
+if preSell
+    slS = high + sprBuf * atr
+    tp1 = rLo
+    tp2 = rLo - tp2Mult * rangeH
+    x2  = bar_index + 25
+    label.new(bar_index, high, "PRE-BREAKOUT SELL " + str.tostring(math.min(confS, 100), "#") + "%\nUpthrust @ " + str.tostring(close, format.mintick), style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)
+    if showCoilTargets
+        line.new(bar_index, slS, x2, slS, color = color.red, width = 2)
+        line.new(bar_index, tp1, x2, tp1, color = color.new(color.green, 30))
+        line.new(bar_index, tp2, x2, tp2, color = color.green, width = 2)
+        label.new(x2, slS, "SL "  + str.tostring(slS, format.mintick), style = label.style_label_left, color = color.new(color.red, 85), textcolor = color.red, size = size.small)
+        label.new(x2, tp1, "TP1 range low", style = label.style_label_left, color = color.new(color.green, 88), textcolor = color.green, size = size.small)
+        label.new(x2, tp2, "TP2 measured " + str.tostring(tp2, format.mintick), style = label.style_label_left, color = color.new(color.green, 82), textcolor = color.green, size = size.small)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SHADING (squeeze) — kept after AMD so it layers on top of the Asia box tint
+// ════════════════════════════════════════════════════════════════════════════
+bgcolor(showSqzShade and squeezeOn ? color.new(color.yellow, 96) : na)
+plotshape(useCoil and sqzStart, "Squeeze start", shape.diamond, location.abovebar, color.new(color.yellow, 30), size = size.tiny)
+plotchar(useCoil and squeezeOn and sqzCount == minSqz, "Coil armed", "⚡", location.abovebar, color.yellow, size = size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  STATUS PANEL
+// ════════════════════════════════════════════════════════════════════════════
+if showInfo and barstate.islast
+    amdTxt = not useAMD ? "off" : phase == 0 ? "Accumulation" : phase == 1 ? (nyWarnDone ? "Hunting — NY to manip" : "Hunting liquidity") : phase == 2 ? "Sweep — await reject" : phase == 3 ? "Manipulation → RBOS?" : phase == 4 ? "Distribution ✅" : "No clean AMD"
+    biasTxt = (phase == 3 or phase == 4) ? (manipDir == 1 ? "SHORT" : "LONG") : "—"
+    sessTxt = phase < 3 ? "building" : manipSess == "London" ? "London-led" : manipSess == "NY" ? "NY-open-led" : "—"
+    coilTxt = not useCoil ? "off" : squeezeOn ? ("squeezing (" + str.tostring(sqzCount) + "/" + str.tostring(minSqz) + ")") : "no squeeze"
+    var table t = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 80), border_width = 1, border_color = color.new(color.gray, 70))
+    table.cell(t, 0, 0, "COIL HUNTER SUITE", text_color = color.black, bgcolor = color.yellow, text_size = size.small)
+    table.cell(t, 1, 0, active + (presetMode == "Auto (detect from chart)" ? " (auto)" : ""), text_color = color.black, bgcolor = color.yellow, text_size = size.small)
+    table.cell(t, 0, 1, "Symbol", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 1, sym, text_color = color.white, text_size = size.tiny)
+    table.cell(t, 0, 2, "Coil", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 2, coilTxt, text_color = squeezeOn ? color.yellow : color.white, text_size = size.tiny)
+    table.cell(t, 0, 3, "OBV bias", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 3, accumBull ? "bull" : accumBear ? "bear" : "flat", text_color = color.white, text_size = size.tiny)
+    table.cell(t, 0, 4, "AMD phase", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 4, amdTxt, text_color = phase == 4 ? color.lime : color.white, text_size = size.tiny)
+    table.cell(t, 0, 5, "AMD bias", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 5, biasTxt, text_color = manipDir == 1 ? amdManipCol : manipDir == -1 ? amdDistCol : color.white, text_size = size.tiny)
+    table.cell(t, 0, 6, "AMD session", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 6, sessTxt, text_color = color.new(color.yellow, 0), text_size = size.tiny)
+    table.cell(t, 0, 7, "Min conf", text_color = color.gray, text_size = size.tiny)
+    table.cell(t, 1, 7, str.tostring(minConf) + "%", text_color = color.white, text_size = size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ALERTS
+// ════════════════════════════════════════════════════════════════════════════
+manipNow = phase == 3 and phase[1] != 3
+flipNow  = phase == 3 and phase[1] == 3 and manipDir != manipDir[1]
+distNow  = phase == 4 and phase[1] != 4
+alertcondition(preBuy,  "Coil BUY",  "COIL HUNTER: Pre-breakout BUY (spring inside squeeze)")
+alertcondition(preSell, "Coil SELL", "COIL HUNTER: Pre-breakout SELL (upthrust inside squeeze)")
+alertcondition(sqzStart, "Squeeze started", "COIL HUNTER: Compression started")
+alertcondition(manipNow or flipNow, "AMD Manipulation", "AMD: Asia liquidity swept and rejected — manipulation confirmed")
+alertcondition(distNow, "AMD Distribution", "AMD: displaced RBOS — distribution underway")
+if preBuy
+    alert("COIL BUY (spring) " + str.tostring(math.min(confL, 100), "#") + "% @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if preSell
+    alert("COIL SELL (upthrust) " + str.tostring(math.min(confS, 100), "#") + "% @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)

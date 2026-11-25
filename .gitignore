@@ -1,0 +1,18 @@
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editors / tooling
+.vscode/
+__pycache__/
+.venv/
+node_modules/
+build/
+dist/
+*.log
+.env
+
+# Working notes, not part of the repo
+tasks/
+AGENTS.md
