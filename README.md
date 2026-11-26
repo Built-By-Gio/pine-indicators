@@ -7,8 +7,8 @@ For education and chart study, not financial advice.
 ## Status (2026-11-25)
 
 - Written for Pine v6 (`//@version=6`). It compiles and loads in TradingView.
-- Signals have not been backtested here. No results or performance figures are claimed.
-- Not documented yet: chart screenshots.
+- I have not backtested the signals yet, so there are no results or performance figures.
+- Still to add: chart screenshots.
 
 ## What it shows
 
